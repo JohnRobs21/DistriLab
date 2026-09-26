@@ -1,0 +1,11 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "1. Launch Bootstrap Node",
+      "request": "launch",
+      "mainClass": "bootstrap.BootstrapNode"
+    }
+  ]
+}

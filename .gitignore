@@ -1,0 +1,9 @@
+# Compiled Java outputs
+bin/
+*.class
+
+# IDE and Build caches
+.settings/
+.classpath
+.project
+.DS_Store
