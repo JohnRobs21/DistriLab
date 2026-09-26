@@ -27,7 +27,7 @@
       "request": "launch",
       "mainClass": "worker.WorkerNode",
       "args": "103 1099"
-    }
+    },
     {
       "type": "java",
       "name": "5. Launch Worker 104",
