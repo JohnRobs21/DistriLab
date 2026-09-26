@@ -6,6 +6,34 @@
       "name": "1. Launch Bootstrap Node",
       "request": "launch",
       "mainClass": "bootstrap.BootstrapNode"
+    },
+    {
+      "type": "java",
+      "name": "2. Launch Worker 101",
+      "request": "launch",
+      "mainClass": "worker.WorkerNode",
+      "args": "101 1099"
+    },
+    {
+      "type": "java",
+      "name": "3. Launch Worker 102",
+      "request": "launch",
+      "mainClass": "worker.WorkerNode",
+      "args": "102 1099"
+    },
+    {
+      "type": "java",
+      "name": "4. Launch Worker 103",
+      "request": "launch",
+      "mainClass": "worker.WorkerNode",
+      "args": "103 1099"
+    }
+    {
+      "type": "java",
+      "name": "5. Launch Worker 104",
+      "request": "launch",
+      "mainClass": "worker.WorkerNode",
+      "args": "104 1099"
     }
   ]
 }
