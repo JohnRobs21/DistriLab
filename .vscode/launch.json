@@ -34,6 +34,12 @@
       "request": "launch",
       "mainClass": "worker.WorkerNode",
       "args": "104 1099"
+    },
+    {
+      "type": "java",
+      "name": "6. Launch Client GUI",
+      "request": "launch",
+      "mainClass": "client.ClientGUI"
     }
   ]
 }
