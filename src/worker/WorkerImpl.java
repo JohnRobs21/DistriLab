@@ -1,23 +1,20 @@
 package worker;
 
+import common.JobPayload;
 import common.WorkerService;
 import java.rmi.Naming;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Future;
-
-//newly implemented imports
-import common.JobPayload;
-import java.util.Arrays;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-
+import java.util.concurrent.Future;
 
 public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
 
@@ -31,10 +28,12 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
     // Election & Leadership State
     private final Set<String> processedElections;
     private int currentTermId;
-    private boolean isLeader;
-    private WorkerService currentCoordinator;
-    private String currentCoordinatorUrl;
+    private volatile boolean isLeader;
+    private volatile WorkerService currentCoordinator;
+    private volatile String currentCoordinatorUrl;
     private int jobsInCurrentTerm;
+
+    private final ExecutorService dispatchExecutor = Executors.newCachedThreadPool();
 
     public WorkerImpl(int nodeId) throws RemoteException {
         super();
@@ -89,7 +88,7 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
     }
 
     @Override
-    public synchronized void receiveElection(String electionId, int candidateJAC, int candidateId, List<Integer> visitedNodes) throws RemoteException {
+    public void receiveElection(String electionId, int candidateJAC, int candidateId, List<Integer> visitedNodes) throws RemoteException {
         if (processedElections.contains(electionId)) {
             return;
         }
@@ -129,13 +128,15 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         if (neighbors == null) return;
 
         for (WorkerService neighbor : neighbors) {
-            try {
-                if (neighbor != null && !visitedNodes.contains(neighbor.getNodeId())) {
-                    neighbor.receiveElection(electionId, candidateJAC, candidateId, visitedNodes);
+            dispatchExecutor.submit(() -> {
+                try {
+                    if (neighbor != null && !visitedNodes.contains(neighbor.getNodeId())) {
+                        neighbor.receiveElection(electionId, candidateJAC, candidateId, visitedNodes);
+                    }
+                } catch (RemoteException e) {
+                    System.err.println("[Worker " + nodeId + "] Unreachable neighbor during election propagation.");
                 }
-            } catch (RemoteException e) {
-                System.err.println("[Worker " + nodeId + "] Unreachable neighbor during election propagation.");
-            }
+            });
         }
     }
 
@@ -143,18 +144,20 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         System.out.println("\n[Worker " + nodeId + "] ELECTED AS LEADER FOR TERM " + termId + "!");
 
         for (WorkerService neighbor : neighbors) {
-            try {
-                if (neighbor != null) {
-                    neighbor.receiveCoordinator(winnerId, winnerRmiUrl, termId);
+            dispatchExecutor.submit(() -> {
+                try {
+                    if (neighbor != null) {
+                        neighbor.receiveCoordinator(winnerId, winnerRmiUrl, termId);
+                    }
+                } catch (RemoteException e) {
+                    System.err.println("[Worker " + nodeId + "] Error broadcasting coordinator status.");
                 }
-            } catch (RemoteException e) {
-                System.err.println("[Worker " + nodeId + "] Error broadcasting coordinator status.");
-            }
+            });
         }
     }
 
     @Override
-    public synchronized void receiveCoordinator(int electedLeaderId, String leaderRmiUrl, int termId) throws RemoteException {
+    public void receiveCoordinator(int electedLeaderId, String leaderRmiUrl, int termId) throws RemoteException {
         if (this.currentTermId >= termId) {
             return;
         }
@@ -179,56 +182,91 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         }
 
         for (WorkerService neighbor : neighbors) {
-            try {
-                if (neighbor != null) {
-                    neighbor.receiveCoordinator(electedLeaderId, leaderRmiUrl, termId);
-                }
-            } catch (RemoteException e) {
-                // Neighbor already notified
-            }
+            dispatchExecutor.submit(() -> {
+                try {
+                    if (neighbor != null) {
+                        neighbor.receiveCoordinator(electedLeaderId, leaderRmiUrl, termId);
+                    }
+                } catch (RemoteException ignored) {}
+            });
         }
     }
-// Distributed Job Processing
+
+    // Distributed Job Processing
     @Override
-    public synchronized Object submitJob(String jobType, Object jobData) throws RemoteException {
+    public Object submitJob(String jobType, Object jobData) throws RemoteException {
+        // 1. If not leader, forward to leader
         if (!isLeader) {
             if (currentCoordinator != null) {
                 return currentCoordinator.submitJob(jobType, jobData);
             } else {
                 initiateElection();
+                
+                int retries = 0;
+                while (currentCoordinator == null && retries < 10) {
+                    try {
+                        Thread.sleep(300);
+                    } catch (InterruptedException ignored) {}
+                    retries++;
+                }
+
                 if (currentCoordinator != null) {
                     return currentCoordinator.submitJob(jobType, jobData);
                 }
-                throw new RemoteException("No active coordinator available.");
+                throw new RemoteException("No active leader available in the cluster.");
             }
         }
 
-        this.jobAllocationCounter++;
-        this.jobsInCurrentTerm++;
+        // 2. Increment counters
+        synchronized(this) {
+            this.jobAllocationCounter++;
+            this.jobsInCurrentTerm++;
+        }
 
         List<WorkerService> targetWorkers = getNeighbors();
         targetWorkers.add(this);
 
-        JobPayload payload = (JobPayload) jobData;
+        // Safe conversion of incoming payload
+        JobPayload payload;
+        if (jobData instanceof JobPayload) {
+            payload = (JobPayload) jobData;
+        } else if (jobData instanceof int[]) {
+            payload = new JobPayload((int[]) jobData);
+        } else if (jobData instanceof String) {
+            String str = (String) jobData;
+            String[] parts = str.trim().split("\\s*,\\s*");
+            int[] nums = new int[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                nums[i] = Integer.parseInt(parts[i].trim());
+            }
+            payload = new JobPayload(nums);
+        } else if (jobData instanceof List) {
+            List<?> list = (List<?>) jobData;
+            int[] nums = new int[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                nums[i] = ((Number) list.get(i)).intValue();
+            }
+            payload = new JobPayload(nums);
+        } else {
+            throw new RemoteException("Unsupported jobData type: " + (jobData != null ? jobData.getClass().getName() : "null"));
+        }
 
-        
-        if (jobType.equalsIgnoreCase("MAX") || jobType.equalsIgnoreCase("PRIMECOUNT")){
-            if(payload.getNumberArray().length < targetWorkers.size()){
+        if (jobType.equalsIgnoreCase("MAX") || jobType.equalsIgnoreCase("PRIMECOUNT")) {
+            if (payload.getNumberArray() != null && payload.getNumberArray().length < targetWorkers.size()) {
                 targetWorkers = targetWorkers.subList(0, payload.getNumberArray().length);
             }
         }
+
         int workerCount = targetWorkers.size();
         ExecutorService executor = Executors.newFixedThreadPool(workerCount);
         List<Future<Object>> futures = new ArrayList<>();
 
-        
-
         for (int i = 0; i < workerCount; i++) {
             final WorkerService worker = targetWorkers.get(i);
             final int workerIndex = i;
-        Callable<Object> task = () -> {
-            JobPayload subPayload = createSubJobPayload(jobType, payload, workerIndex, workerCount);
-            return worker.executeSubTask(jobType, subPayload);
+            Callable<Object> task = () -> {
+                JobPayload subPayload = createSubJobPayload(jobType, payload, workerIndex, workerCount);
+                return worker.executeSubTask(jobType, subPayload);
             };
             futures.add(executor.submit(task));
         }
@@ -236,16 +274,19 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         Object finalResult = aggregateResults(jobType, futures);
         executor.shutdown();
 
-        if (jobsInCurrentTerm >= 5){
-            System.out.println("==================================================");
-            System.out.println("[Leader Worker " + nodeId + "] Reached 5-job limit for Term " + currentTermId + ". Term ending!");
-            System.out.println("==================================================");
-            this.isLeader = false;
-            this.jobsInCurrentTerm = 0;
-            new Thread(this::initiateElection).start();
+        // 3. Handle 5-job term expiration
+        synchronized(this) {
+            if (jobsInCurrentTerm >= 5) {
+                System.out.println("==================================================");
+                System.out.println("[Leader Worker " + nodeId + "] Reached 5-job limit for Term " + currentTermId + ". Term ending!");
+                System.out.println("==================================================");
+                this.isLeader = false;
+                this.jobsInCurrentTerm = 0;
+                new Thread(this::initiateElection).start();
+            }
         }
-        return finalResult;
 
+        return finalResult;
     }
 
     @Override
@@ -253,27 +294,28 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         return 5 - jobsInCurrentTerm;
     }
 
-    
-
-    private JobPayload createSubJobPayload(String jobType, JobPayload totalPayload, int index, int totalWorkers){
+    private JobPayload createSubJobPayload(String jobType, JobPayload totalPayload, int index, int totalWorkers) {
         if (jobType.equalsIgnoreCase("MAX") || jobType.equalsIgnoreCase("PRIMECOUNT")) {
             int[] arr = totalPayload.getNumberArray();
-            int chunkSize = (int) Math.ceil((double) arr.length/totalWorkers);
-            int start = index * chunkSize;
+            if (arr == null) {
+                return new JobPayload(new int[0]);
+            }
+            int chunkSize = (int) Math.ceil((double) arr.length / totalWorkers);
+            int start = Math.min(index * chunkSize, arr.length);
             int end = Math.min(start + chunkSize, arr.length);
+            
             return new JobPayload(Arrays.copyOfRange(arr, start, end));
-
-        }else{
+        } else {
             int start = totalPayload.getStartRange();
             int end = totalPayload.getEndRange();
             int rangeSize = (end - start + 1);
-            int chunkSize = rangeSize/totalWorkers;
+            int chunkSize = rangeSize / totalWorkers;
 
-            int subStart = start + (index*chunkSize);
-            int subEnd = (index == totalWorkers - 1) ? end: subStart + chunkSize - 1;
+            int subStart = start + (index * chunkSize);
+            int subEnd = (index == totalWorkers - 1) ? end : subStart + chunkSize - 1;
             return new JobPayload(subStart, subEnd);
         }
-    } 
+    }
 
     private Object aggregateResults(String jobType, List<Future<Object>> futures) {
         try {
@@ -302,41 +344,40 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         return null;
     }
 
-    //Local Sub-Task Computation worker side
+    // Local Sub-Task Computation worker side
     @Override
-    public Object executeSubTask(String jobType, Object taskData) throws RemoteException{
+    public Object executeSubTask(String jobType, Object taskData) throws RemoteException {
         JobPayload payload = (JobPayload) taskData;
 
-        if(jobType.equalsIgnoreCase("MAX")){
+        if (jobType.equalsIgnoreCase("MAX")) {
             int[] arr = payload.getNumberArray();
             int max = Integer.MIN_VALUE;
-            for(int num: arr){
-                if (num>max) max = num;
+            for (int num : arr) {
+                if (num > max) max = num;
             }
-            System.out.println("[Worker " + nodeId + "] Executed sub-task MAX -> Chunk Max:" + max);
+            System.out.println("[Worker " + nodeId + "] Executed sub-task MAX -> Chunk Max: " + max);
             return max;
-        }else if (jobType.equalsIgnoreCase("PRIMESUM")){
-        long sum = 0;
-        for(int i = payload.getStartRange(); i <= payload.getEndRange(); i++){
-            if (isPrime(i)) sum += i;
-        }
-        System.out.println("[Worker " + nodeId + "] Executed sub-task PRIMESUM (" + payload.getStartRange() + " to " + payload.getEndRange() + ") -> Sub-Sum: " + sum);
-        return sum;
-
-        
-        }else if (jobType.equalsIgnoreCase("PRIMECOUNT")) {
+        } else if (jobType.equalsIgnoreCase("PRIMESUM")) {
+            long sum = 0;
+            for (int i = payload.getStartRange(); i <= payload.getEndRange(); i++) {
+                if (isPrime(i)) sum += i;
+            }
+            System.out.println("[Worker " + nodeId + "] Executed sub-task PRIMESUM (" + payload.getStartRange() + " to " + payload.getEndRange() + ") -> Sub-Sum: " + sum);
+            return sum;
+        } else if (jobType.equalsIgnoreCase("PRIMECOUNT")) {
             int[] arr = payload.getNumberArray();
             int count = 0;
-            for (int i: arr) {
+            for (int i : arr) {
                 if (isPrime(i)) count++;
             }
-            System.out.println("[Worker " + nodeId + "] Executed sub-task PRIMECOUNT -> sub-Count:" + count);
+            System.out.println("[Worker " + nodeId + "] Executed sub-task PRIMECOUNT -> sub-Count: " + count);
             return count;
         }
 
         return null;
-        }
-        private boolean isPrime(int n) {
+    }
+
+    private boolean isPrime(int n) {
         if (n <= 1) return false;
         if (n <= 3) return true;
         if (n % 2 == 0 || n % 3 == 0) return false;
@@ -346,7 +387,3 @@ public class WorkerImpl extends UnicastRemoteObject implements WorkerService {
         return true;
     }
 }
-
-    
-
-   

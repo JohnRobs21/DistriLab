@@ -1,4 +1,4 @@
-package Client;
+package client;
 
 import common.JobPayload;
 import common.WorkerService;
@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * submission on a background thread (SwingWorker) so multiple jobs can be
  * in flight concurrently without blocking the UI.
  */
-public class clientGUI extends JFrame {
+public class ClientGUI extends JFrame {
 
     private JTextField rmiUrlField;
     private JButton connectButton;
@@ -56,7 +56,7 @@ public class clientGUI extends JFrame {
     private static final String CARD_ARRAY = "ARRAY_INPUT";
     private static final String CARD_RANGE = "RANGE_INPUT";
 
-    public clientGUI() {
+    public ClientGUI() {
         super("DistriLab Client");
         buildUI();
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -320,7 +320,7 @@ public class clientGUI extends JFrame {
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            clientGUI gui = new clientGUI();
+            ClientGUI gui = new ClientGUI();
             gui.setVisible(true);
         });
     }
