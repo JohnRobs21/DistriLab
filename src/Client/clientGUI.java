@@ -177,9 +177,7 @@ public class ClientGUI extends JFrame {
         }
     }
 
-    // ---------------------------------------------------------------
     // CSV loading
-    // ---------------------------------------------------------------
     private void loadFromCsv() {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Select CSV file");
@@ -220,9 +218,7 @@ public class ClientGUI extends JFrame {
         }
     }
 
-    // ---------------------------------------------------------------
     // Job submission (background thread via SwingWorker)
-    // ---------------------------------------------------------------
     private void onSubmit() {
         if (connectedWorker == null) {
             JOptionPane.showMessageDialog(this, "Connect to a worker first.",
@@ -297,9 +293,7 @@ public class ClientGUI extends JFrame {
         }
     }
 
-    // ---------------------------------------------------------------
     // Results table
-    // ---------------------------------------------------------------
     private JPanel buildResultsPanel() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("Job Results"));
